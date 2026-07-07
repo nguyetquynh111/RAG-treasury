@@ -1,0 +1,43 @@
+data_dir: data
+csv_path: officeqa_full.csv
+selected_years:
+  - 2020
+  - 2021
+  - 2022
+  - 2023
+  - 2024
+  - 2025
+  - 2026
+
+vector_db_type: faiss
+embedding:
+  backend: deepinfra
+  model_name: nvidia/llama-nemotron-embed-vl-1b-v2
+  base_url: https://api.deepinfra.com/v1/openai
+  api_key_env: DEEPINFRA_API_KEY
+  normalize: true
+  batch_size: 32
+  timeout_seconds: 300
+  request_sleep_seconds: 0.0
+  retry_sleep_seconds: 5.0
+  max_retries: 3
+
+chunk_size: 512
+chunk_overlap: 50
+top_k: 5
+generation:
+  backend: deepinfra
+  model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning
+  base_url: https://api.deepinfra.com/v1/openai
+  api_key_env: DEEPINFRA_API_KEY
+  temperature: 0.0
+  max_tokens: 128
+  max_context_chars: 2500
+  timeout_seconds: 300
+  request_sleep_seconds: 0.0
+  retry_sleep_seconds: 5.0
+  max_retries: 3
+  allow_extractive_fallback: true
+  require_citations: true
+  fallback_on_ungrounded_answer: true
+output_dir: outputs/baseline

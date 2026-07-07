@@ -1,0 +1,10 @@
+pandas>=2.2.0
+numpy>=1.26.0,<2.0
+PyYAML>=6.0.1
+faiss-cpu==1.8.0.post1
+scipy>=1.12,<1.14
+sentence-transformers>=3.0,<4.0
+pytest>=8.0
+tqdm>=4.66.0
+datasets
+openai>=1.0.0
