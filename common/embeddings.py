@@ -5,9 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from openai import OpenAI, RateLimitError
+try:  # pragma: no cover - normal path when requirements are installed
+    from openai import OpenAI, RateLimitError
+except ModuleNotFoundError:  # pragma: no cover - lightweight test environments
+    from common.llm import OpenAI, RateLimitError
 
-from common.rag_generation import (
+from common.llm import (
     DEFAULT_DEEPINFRA_API_KEY_ENV,
     DEFAULT_OPENAI_BASE_URL,
     load_env_file,

@@ -1,1 +1,1 @@
-"""Engineered Treasury QA retrieval pipeline."""
+"""Engineered mode-specific retrieval package."""

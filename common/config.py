@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
 
 
+DEFAULT_CONFIG_PATH = Path("config/config.yaml")
+DEFAULT_INDEX_DIR = "outputs/index"
+PIPELINE_MODES = {"baseline", "engineered"}
 SUPPORTED_VECTOR_DB_TYPES = {"faiss"}
 SUPPORTED_EMBEDDING_BACKENDS = {"deepinfra"}
 SUPPORTED_GENERATION_BACKENDS = {"deepinfra", "openai", "extractive"}
+SHARED_REQUIRED_CONFIG_KEYS = (
+    "data_dir",
+    "csv_path",
+    "selected_years",
+    "vector_db_type",
+    "chunk_size",
+    "chunk_overlap",
+    "top_k",
+)
 EMBEDDING_POSITIVE_INT_KEYS = ("batch_size", "timeout_seconds")
 EMBEDDING_NONNEGATIVE_INT_KEYS = ("max_retries",)
 EMBEDDING_NONNEGATIVE_FLOAT_KEYS = ("request_sleep_seconds", "retry_sleep_seconds")
@@ -33,6 +46,85 @@ def load_yaml_config(config_path: str | Path, *, label: str) -> dict[str, Any]:
     return config
 
 
+def load_pipeline_config(config_path: str | Path = DEFAULT_CONFIG_PATH, *, mode: str) -> dict[str, Any]:
+    """Load the shared config and apply only the selected pipeline's run settings.
+
+    Baseline and engineered intentionally read the same file. The only run-level
+    behavior selected here is whether metadata is enabled and which artifact
+    directory to write to.
+    """
+    if mode not in PIPELINE_MODES:
+        raise ValueError(f"mode must be one of {sorted(PIPELINE_MODES)}, got {mode!r}")
+
+    path = Path(config_path)
+    config = deepcopy(load_yaml_config(path, label="Pipeline"))
+    require_keys(config, SHARED_REQUIRED_CONFIG_KEYS, path=path)
+    apply_run_settings(config, mode, path)
+    validate_faiss_config(config, label=mode)
+    normalize_selected_years(config)
+    normalize_document_years(config)
+    normalize_chunk_settings(config)
+    normalize_positive_ints(config, ("top_k",))
+    normalize_embedding_config(config)
+    normalize_generation_config(config)
+    config["mode"] = mode
+    return config
+
+
+def load_index_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+    """Load config for the single shared index build.
+
+    The index build is not a baseline or engineered run. It uses only shared
+    settings and writes to index_dir.
+    """
+    path = Path(config_path)
+    config = deepcopy(load_yaml_config(path, label="Index"))
+    require_keys(config, SHARED_REQUIRED_CONFIG_KEYS, path=path)
+    validate_faiss_config(config, label="shared index")
+    normalize_selected_years(config)
+    normalize_document_years(config)
+    normalize_chunk_settings(config)
+    normalize_positive_ints(config, ("top_k",))
+    normalize_embedding_config(config)
+    normalize_generation_config(config)
+    config.setdefault("index_dir", DEFAULT_INDEX_DIR)
+    config["mode"] = "index"
+    return config
+
+
+def apply_run_settings(config: dict[str, Any], mode: str, path: Path) -> None:
+    """Merge the selected run settings into a shared config dictionary."""
+    runs = config.pop("runs", None)
+    if runs is None:
+        # Backward-compatible path for tiny test configs and one-off evaluation configs.
+        if "output_dir" not in config:
+            raise ValueError(f"Missing 'runs' or 'output_dir' in {path}.")
+        config.setdefault("metadata_enabled", mode == "engineered")
+        config.setdefault("index_dir", config["output_dir"])
+        return
+
+    if not isinstance(runs, dict):
+        raise ValueError(f"runs must be a mapping in {path}.")
+    run_config = runs.get(mode)
+    if not isinstance(run_config, dict):
+        raise ValueError(f"Missing runs.{mode} mapping in {path}.")
+    if "output_dir" not in run_config:
+        raise ValueError(f"Missing runs.{mode}.output_dir in {path}.")
+
+    # Do not allow per-run algorithm/config drift. Keep run settings limited to
+    # artifact path and metadata toggle.
+    allowed_run_keys = {"output_dir", "metadata_enabled"}
+    unexpected = sorted(set(run_config) - allowed_run_keys)
+    if unexpected:
+        raise ValueError(
+            f"Unsupported per-run keys in runs.{mode}: {unexpected}. "
+            "Move shared settings to the top level."
+        )
+    config["output_dir"] = run_config["output_dir"]
+    config["metadata_enabled"] = bool(run_config.get("metadata_enabled", mode == "engineered"))
+    config.setdefault("index_dir", DEFAULT_INDEX_DIR)
+
+
 def require_keys(config: dict[str, Any], required_keys: Iterable[str], *, path: Path) -> None:
     """Fail loudly when a config omits required top-level keys."""
     missing = [key for key in required_keys if key not in config]
@@ -52,6 +144,14 @@ def normalize_selected_years(config: dict[str, Any]) -> None:
     if not isinstance(years, list) or not years:
         raise ValueError("selected_years must be a non-empty list of years.")
     config["selected_years"] = [int(year) for year in years]
+
+
+def normalize_document_years(config: dict[str, Any]) -> None:
+    """Validate document_years, defaulting to selected_years for small configs."""
+    document_years = config.get("document_years", config["selected_years"])
+    if not isinstance(document_years, list) or not document_years:
+        raise ValueError("document_years must be a non-empty list of years when provided.")
+    config["document_years"] = [int(year) for year in document_years]
 
 
 def normalize_chunk_settings(config: dict[str, Any]) -> None:

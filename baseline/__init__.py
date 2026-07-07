@@ -1,2 +1,1 @@
-"""Simple baseline RAG package for Treasury QA."""
-
+"""Baseline mode-specific retrieval package."""

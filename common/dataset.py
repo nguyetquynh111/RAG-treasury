@@ -79,6 +79,7 @@ class OfficeQARow:
     gold_answer: str
     row_year: int
     row_month: int | None
+    source_date_pairs: tuple[tuple[int, int], ...]
 
 
 def extract_year_month(value: str) -> tuple[int, int] | None:
@@ -94,8 +95,8 @@ def extract_all_year_month(value: str) -> list[tuple[int, int]]:
     pairs: list[tuple[int, int]] = []
 
     numeric_patterns = [
-        rf"(?P<year>{YEAR_PATTERN})[_\-/\.](?P<month>1[0-2]|0?[1-9])",
-        rf"(?P<month>1[0-2]|0?[1-9])[_\-/\.](?P<year>{YEAR_PATTERN})",
+        rf"(?P<year>{YEAR_PATTERN})[_\-/\.](?P<month>1[0-2]|0?[1-9])(?=\D|$)",
+        rf"(?<!\d)(?P<month>1[0-2]|0?[1-9])[_\-/\.](?P<year>{YEAR_PATTERN})",
     ]
     for pattern in numeric_patterns:
         for match in re.finditer(pattern, text):
@@ -171,6 +172,7 @@ def load_officeqa_rows(csv_path: str | Path) -> list[OfficeQARow]:
     rows: list[OfficeQARow] = []
     for index, row in df.iterrows():
         row_year, row_month = derive_row_year_month(row, columns, question_col)
+        source_date_pairs = derive_source_date_pairs(row, columns, row_year, row_month)
         question_id = str(row[id_col]) if id_col is not None and not pd.isna(row[id_col]) else str(index)
         rows.append(
             OfficeQARow(
@@ -179,6 +181,7 @@ def load_officeqa_rows(csv_path: str | Path) -> list[OfficeQARow]:
                 gold_answer=str(row[answer_col]),
                 row_year=row_year,
                 row_month=row_month,
+                source_date_pairs=tuple(source_date_pairs),
             )
         )
     return rows
@@ -252,6 +255,21 @@ def source_year_month_pairs(row: pd.Series, columns: list[str]) -> list[tuple[in
         if column.lower().strip() in SOURCE_COLUMNS and not pd.isna(row[column]):
             pairs.extend(extract_all_year_month(str(row[column])))
     return pairs
+
+
+def derive_source_date_pairs(
+    row: pd.Series,
+    columns: list[str],
+    row_year: int,
+    row_month: int | None,
+) -> list[tuple[int, int]]:
+    """Return exact source year/month pairs when available for multi-document retrieval."""
+    source_pairs = dedupe_preserving_order(source_year_month_pairs(row, columns))
+    if source_pairs:
+        return source_pairs
+    if row_month is not None:
+        return [(row_year, row_month)]
+    return []
 
 
 def summarize_year_month_pairs(pairs: list[tuple[int, int]]) -> tuple[int, int | None]:

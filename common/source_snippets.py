@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable
 
-from common.rag_generation import SourceSnippet
+from common.llm import SourceSnippet
 from common.text import normalize_text
 
 TextGetter = Callable[[Any], Any]
