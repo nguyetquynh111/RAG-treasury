@@ -28,6 +28,7 @@ from common.rag_generation import (
     chat_completion_message_content,
     create_chat_completion_with_rate_limit_sleep,
     load_env_file,
+    sleep_if_positive,
 )
 
 
@@ -61,6 +62,10 @@ class JudgeResult:
     raw_response: dict[str, Any]
 
 
+class JudgeResponseError(ValueError):
+    """Raised when the judge response cannot be parsed or validated."""
+
+
 class DeepInfraJudge:
     """Small OpenAI-compatible judge client for groundedness and hallucination scoring."""
 
@@ -86,23 +91,38 @@ class DeepInfraJudge:
 
     def judge(self, question: str, answer: str, contexts: list[str]) -> JudgeResult:
         prompt = build_judge_prompt(question, answer, contexts)
-        completion = create_chat_completion_with_rate_limit_sleep(
-            settings=self._settings(),
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        message_content = judge_completion_message_content(completion)
-        parsed = parse_json_object(message_content)
-        return JudgeResult(
-            supported_claims=judge_count(parsed.get("supported_claims", 0), "supported_claims"),
-            total_claims=judge_count(parsed.get("total_claims", 0), "total_claims"),
-            fabricated_claims=judge_count(parsed.get("fabricated_claims", 0), "fabricated_claims"),
-            raw_response={
-                "message": {"content": message_content},
-                "parsed": parsed,
-                "model": getattr(completion, "model", self.model),
-            },
-        )
+        for attempt in range(self.max_retries + 1):
+            completion = create_chat_completion_with_rate_limit_sleep(
+                settings=self._settings(),
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            message_content = judge_completion_message_content(completion)
+            try:
+                parsed = parse_json_object(message_content)
+                supported_claims = judge_count(parsed.get("supported_claims", 0), "supported_claims")
+                total_claims = judge_count(parsed.get("total_claims", 0), "total_claims")
+                fabricated_claims = judge_count(parsed.get("fabricated_claims", 0), "fabricated_claims")
+            except ValueError as exc:
+                if attempt == self.max_retries:
+                    raise JudgeResponseError(
+                        f"LLM judge did not return valid JSON after {self.max_retries} retries: {exc}"
+                    ) from exc
+                sleep_if_positive(self.retry_sleep_seconds)
+                continue
+
+            return JudgeResult(
+                supported_claims=supported_claims,
+                total_claims=total_claims,
+                fabricated_claims=fabricated_claims,
+                raw_response={
+                    "message": {"content": message_content},
+                    "parsed": parsed,
+                    "model": getattr(completion, "model", self.model),
+                },
+            )
+
+        raise RuntimeError("Unexpected judge response retry loop exit.")
 
     def _settings(self) -> GenerationSettings:
         """Return settings compatible with the shared OpenAI client helper."""
@@ -141,6 +161,7 @@ def evaluate_predictions(
     csv_path = resolve_path(config_path, config["csv_path"])
 
     predictions = load_predictions(resolved_predictions_path)
+    retrieval_logs = load_retrieval_logs(resolved_output_dir / "retrieval_logs.jsonl")
     chunks = load_chunks(chunks_path)
     answer_key = pd.read_csv(csv_path)
     answer_lookup = build_answer_lookup(answer_key)
@@ -180,6 +201,7 @@ def evaluate_predictions(
     for _, row in predictions.iterrows():
         row_data = row.to_dict()
         question_id = str(row_data.get("question_id", row_data.get("row_id", "")))
+        row_data = merge_retrieval_log(row_data, retrieval_logs.get(question_id))
         answer_row = lookup_answer_row(row_data, answer_lookup, answer_key)
         question = str(row_data.get("question", answer_row.get("question", "")))
         gold_answer = str(row_data.get("gold_answer", answer_row.get("answer", "")))
@@ -212,6 +234,8 @@ def evaluate_predictions(
             contexts = [chunk.text for chunk in retrieved_chunks[:5]]
             try:
                 judge_result = judge.judge(question, predicted_answer, contexts)
+            except JudgeResponseError:
+                raise
             except (OpenAIError, ValueError, KeyError) as exc:
                 judge_error = describe_judge_error(exc, judge.model, question_id)
                 judge = None
@@ -285,6 +309,36 @@ def load_predictions(predictions_path: Path) -> pd.DataFrame:
     return predictions
 
 
+def load_retrieval_logs(logs_path: Path) -> dict[str, dict[str, Any]]:
+    """Load optional JSONL retrieval logs keyed by question id."""
+    if not logs_path.exists():
+        return {}
+
+    logs: dict[str, dict[str, Any]] = {}
+    with logs_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in retrieval log {logs_path}:{line_number}") from exc
+            question_id = record.get("question_id")
+            if question_id is not None and not is_missing(question_id):
+                logs[str(question_id)] = record
+    return logs
+
+
+def merge_retrieval_log(row_data: dict[str, Any], log_row: dict[str, Any] | None) -> dict[str, Any]:
+    """Combine clean prediction rows with optional sidecar retrieval metadata."""
+    if not log_row:
+        return row_data
+    merged = dict(log_row)
+    merged.update(row_data)
+    return merged
+
+
 def load_chunks(chunks_path: Path) -> list[ChunkRecord]:
     """Load JSONL chunks into evaluation records."""
     records = load_chunk_records(
@@ -346,27 +400,32 @@ def prediction_text(row: dict[str, Any]) -> str:
 
 
 def retrieved_chunk_ids(row: dict[str, Any]) -> list[str]:
-    context_ids = parse_json_value(row.get("retrieved_context_ids"))
-    if isinstance(context_ids, list):
-        return [str(chunk_id) for chunk_id in context_ids]
+    for column in ["retrieved_context_ids", "final_context_ids"]:
+        context_ids = parse_json_value(row.get(column))
+        if isinstance(context_ids, list):
+            return [str(chunk_id) for chunk_id in context_ids]
 
-    contexts = parse_json_value(row.get("retrieved_context"))
-    if isinstance(contexts, list):
-        ids = []
-        for item in contexts:
-            metadata = item.get("metadata", {}) if isinstance(item, dict) else {}
-            chunk_id = metadata.get("chunk_id")
-            if chunk_id is not None:
-                ids.append(str(chunk_id))
-        return ids
+    for column in ["retrieved_context", "final_context"]:
+        contexts = parse_json_value(row.get(column))
+        if isinstance(contexts, list):
+            ids = []
+            for item in contexts:
+                if not isinstance(item, dict):
+                    continue
+                metadata = item.get("metadata", {})
+                chunk_id = item.get("chunk_id") or metadata.get("chunk_id")
+                if chunk_id is not None:
+                    ids.append(str(chunk_id))
+            return ids
 
-    sources = parse_json_value(row.get("retrieved_sources"))
-    if isinstance(sources, list):
-        ids = []
-        for item in sources:
-            if isinstance(item, dict) and item.get("chunk_id") is not None:
-                ids.append(str(item["chunk_id"]))
-        return ids
+    for column in ["retrieved_sources", "final_sources"]:
+        sources = parse_json_value(row.get(column))
+        if isinstance(sources, list):
+            ids = []
+            for item in sources:
+                if isinstance(item, dict) and item.get("chunk_id") is not None:
+                    ids.append(str(item["chunk_id"]))
+            return ids
 
     return []
 

@@ -7,6 +7,13 @@ from typing import Any
 
 def split_tokens(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     """Split text into whitespace-token windows."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive.")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be non-negative.")
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size.")
+
     tokens = text.split()
     if not tokens:
         return []

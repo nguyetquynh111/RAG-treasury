@@ -258,7 +258,7 @@ def summarize_year_month_pairs(pairs: list[tuple[int, int]]) -> tuple[int, int |
     """Summarize one or more source dates into a row year and optional month."""
     years = {year for year, _ in pairs}
     months = {month for _, month in pairs}
-    return min(years), months.pop() if len(months) == 1 else None
+    return max(years), months.pop() if len(months) == 1 else None
 
 
 def dedupe_preserving_order(values: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:

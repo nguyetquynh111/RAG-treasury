@@ -17,7 +17,7 @@ from engineered.chunking import chunk_documents
 from engineered.config import DEFAULT_CONFIG_PATH, load_config, resolve_path
 from engineered.dataset import load_treasury_documents
 from common.chunk_io import load_chunks, save_chunks
-from common.retrieval_utils import matching_indices
+from common.retrieval_utils import matching_indices, ranked_vector_search
 from common.vector_index import build_inner_product_index, load_vector_index, save_vector_index
 from engineered.query import QueryFilters
 
@@ -191,18 +191,16 @@ class HybridRetriever:
 
     def _vector_search(self, question: str, allowed_indices: list[int], top_k: int) -> list[Candidate]:
         query = self.embedder.encode([question])[0]
-        k = min(top_k, len(allowed_indices))
-        if len(allowed_indices) == len(self.chunks):
-            scores, ids = self.index.search(query.reshape(1, -1), min(k, self.index.ntotal))
-            pairs = [(int(idx), float(score)) for idx, score in zip(ids[0], scores[0]) if idx >= 0]
-        else:
-            matrix = self.embeddings[np.array(allowed_indices)]
-            scores = matrix @ query
-            order = np.argsort(-scores)[:k]
-            pairs = [(allowed_indices[int(position)], float(scores[int(position)])) for position in order]
+        pairs = ranked_vector_search(
+            index=self.index,
+            embeddings=self.embeddings,
+            query=query,
+            allowed_indices=allowed_indices,
+            top_k=top_k,
+        )
         return [
             self._candidate(index, vector_score=score, vector_rank=rank)
-            for rank, (index, score) in enumerate(pairs[:k], start=1)
+            for rank, (index, score) in enumerate(pairs, start=1)
         ]
 
     def _bm25_search(self, question: str, allowed_indices: list[int], top_k: int) -> list[Candidate]:

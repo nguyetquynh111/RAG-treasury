@@ -24,15 +24,15 @@ embedding:
 
 chunk_size: 512
 chunk_overlap: 50
-top_k: 5
+top_k: 30
 generation:
   backend: deepinfra
-  model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning
+  model: Qwen/Qwen2.5-72B-Instruct
   base_url: https://api.deepinfra.com/v1/openai
   api_key_env: DEEPINFRA_API_KEY
   temperature: 0.0
-  max_tokens: 128
-  max_context_chars: 2500
+  max_tokens: 512
+  max_context_chars: 16000
   timeout_seconds: 300
   request_sleep_seconds: 0.0
   retry_sleep_seconds: 5.0

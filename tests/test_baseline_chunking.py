@@ -10,6 +10,10 @@ class BaselineChunkingTests(unittest.TestCase):
 
         self.assertEqual(chunks, ["one two three", "three four five", "five six"])
 
+    def test_split_tokens_rejects_invalid_window_settings(self):
+        with self.assertRaises(ValueError):
+            split_tokens("one two", chunk_size=2, chunk_overlap=2)
+
     def test_chunk_documents_attaches_required_metadata(self):
         document = TreasuryDocument(
             text="alpha beta gamma delta epsilon",

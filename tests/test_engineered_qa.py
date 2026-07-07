@@ -52,14 +52,9 @@ class EngineeredQATests(unittest.TestCase):
                 "question",
                 "gold_answer",
                 "predicted_answer",
-                "selected_years",
                 "detected_year",
                 "detected_month",
-                "retrieved_sources",
-                "retrieved_context_ids",
-                "retrieved_context",
                 "retrieval_method",
-                "model_config",
             ],
         )
         config = {

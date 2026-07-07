@@ -17,7 +17,6 @@ from engineered.generation import RAGAnswerGenerator
 from engineered.query import QueryFilters, parse_query_filters
 from engineered.retrieval import Candidate, HybridRetriever, RERANKING_METHOD, tokenize
 from common.rag_output import (
-    json_dumps,
     retrieved_context_ids,
     retrieved_context_records,
     retrieved_source_records,
@@ -76,14 +75,9 @@ def run_qa(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
                 "question": row.question,
                 "gold_answer": row.gold_answer,
                 "predicted_answer": predicted_answer,
-                "selected_years": json_dumps(config["selected_years"]),
                 "detected_year": filters.year,
                 "detected_month": filters.month,
-                "retrieved_sources": json_dumps(final_sources),
-                "retrieved_context_ids": json_dumps(final_context_ids),
-                "retrieved_context": json_dumps(final_context),
                 "retrieval_method": RETRIEVAL_METHOD,
-                "model_config": model_config,
             }
             writer.writerow(prediction_row)
             flush_output(predictions_handle)
@@ -92,6 +86,9 @@ def run_qa(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
                 "question_id": row.question_id,
                 "detected_year": filters.year,
                 "detected_month": filters.month,
+                "selected_years": config["selected_years"],
+                "retrieval_method": RETRIEVAL_METHOD,
+                "model_config": json.loads(model_config),
                 "number_vector_candidates": diagnostics["number_vector_candidates"],
                 "number_bm25_candidates": diagnostics["number_bm25_candidates"],
                 "number_merged_candidates": diagnostics["number_merged_candidates"],
@@ -101,8 +98,9 @@ def run_qa(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
                 "answer_model": generator.actual_model,
                 "final_context_ids": final_context_ids,
                 "final_sources": final_sources,
+                "final_context": final_context,
             }
-            logs_handle.write(json.dumps(log_row) + "\n")
+            logs_handle.write(json.dumps(log_row, ensure_ascii=False) + "\n")
             flush_output(logs_handle)
             print(
                 f"[engineered] wrote {completed_count}/{total_questions} question_id={row.question_id} "
@@ -174,7 +172,6 @@ def split_evidence_units(text: str) -> list[str]:
     return units
 
 
-
 def query_filters_with_row_fallback(
     question: str,
     selected_years: list[int],
@@ -202,6 +199,7 @@ def engineered_scores(candidate: Candidate) -> dict[str, Any]:
         "rerank_score": candidate.rerank_score,
     }
 
+
 def summarize_model_config(config: dict[str, Any], reranking_method: str) -> str:
     """Summarize retrieval settings for prediction output."""
     embedding = config.get("embedding", {})
@@ -227,14 +225,9 @@ def prediction_columns() -> list[str]:
         "question",
         "gold_answer",
         "predicted_answer",
-        "selected_years",
         "detected_year",
         "detected_month",
-        "retrieved_sources",
-        "retrieved_context_ids",
-        "retrieved_context",
         "retrieval_method",
-        "model_config",
     ]
 
 

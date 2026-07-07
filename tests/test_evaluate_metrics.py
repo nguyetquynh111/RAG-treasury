@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
+from openai import OpenAIError
 
 from evaluate import metrics
 from evaluate.metrics import (
@@ -92,7 +93,7 @@ class EvaluateMetricsTests(unittest.TestCase):
                 )
             config_path.write_text(f"csv_path: {csv_path}\noutput_dir: {output_dir}\n", encoding="utf-8")
 
-            with patch.object(metrics.DeepInfraJudge, "judge", side_effect=ValueError("Bad Request")):
+            with patch.object(metrics.DeepInfraJudge, "judge", side_effect=OpenAIError("Bad Request")):
                 metrics_path = evaluate_predictions(config_path=config_path, use_judge=True)
 
             written = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -101,6 +102,63 @@ class EvaluateMetricsTests(unittest.TestCase):
             self.assertIsNone(written["hallucination_rate"])
             self.assertEqual(written["factual_accuracy"], 1.0)
             self.assertTrue((output_dir / "judge_error.json").exists())
+
+    def test_clean_predictions_use_retrieval_log_for_context_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "outputs"
+            output_dir.mkdir()
+            csv_path = root / "officeqa.csv"
+            config_path = root / "config.yaml"
+
+            pd.DataFrame(
+                [
+                    {
+                        "uid": "Q1",
+                        "question": "What was debt in March 2024?",
+                        "answer": "100",
+                        "source_files": "treasury_bulletin_2024_03.txt",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "question_id": "Q1",
+                        "question": "What was debt in March 2024?",
+                        "gold_answer": "100",
+                        "predicted_answer": "Debt was 100.",
+                        "detected_year": 2024,
+                        "detected_month": 3,
+                        "retrieval_method": "test",
+                    }
+                ]
+            ).to_csv(output_dir / "predictions.csv", index=False)
+            with (output_dir / "retrieval_logs.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"question_id": "Q1", "final_context_ids": ["c1"]}) + "\n")
+            with (output_dir / "chunks.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "text": "Debt was 100.",
+                            "metadata": {
+                                "chunk_id": "c1",
+                                "source_path": "treasury_bulletin_2024_03.txt",
+                                "year": 2024,
+                                "month": 3,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            config_path.write_text(f"csv_path: {csv_path}\noutput_dir: {output_dir}\n", encoding="utf-8")
+
+            metrics_path = evaluate_predictions(config_path=config_path, use_judge=False)
+
+            written = json.loads(metrics_path.read_text(encoding="utf-8"))
+            self.assertEqual(written["hit_rate@5"], 1.0)
+            self.assertEqual(written["recall"], 1.0)
+            self.assertEqual(written["factual_accuracy"], 1.0)
 
     def test_deepinfra_judge_requests_json_format(self):
         completion = SimpleNamespace(
@@ -177,6 +235,126 @@ class EvaluateMetricsTests(unittest.TestCase):
         self.assertEqual(result.supported_claims, 2)
         self.assertEqual(result.total_claims, 3)
         self.assertEqual(result.fabricated_claims, 1)
+
+    def test_deepinfra_judge_retries_invalid_json_response(self):
+        invalid_completion = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))],
+        )
+        valid_completion = SimpleNamespace(
+            model="test-model",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "supported_claims": 1,
+                                "total_claims": 1,
+                                "fabricated_claims": 0,
+                            }
+                        )
+                    )
+                )
+            ],
+        )
+        client = Mock()
+        client.chat.completions.create.side_effect = [invalid_completion, valid_completion]
+
+        with patch.dict(os.environ, {"DEEPINFRA_API_KEY": "test-key"}), patch(
+            "common.rag_generation.OpenAI", return_value=client
+        ):
+            result = metrics.DeepInfraJudge(
+                model="test-model",
+                max_retries=3,
+                request_sleep_seconds=0,
+                retry_sleep_seconds=0,
+            ).judge(
+                "Question?",
+                "Answer.",
+                ["Answer."],
+            )
+
+        self.assertEqual(result.supported_claims, 1)
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+
+    def test_deepinfra_judge_fails_after_invalid_json_retries(self):
+        invalid_completion = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))],
+        )
+        client = Mock()
+        client.chat.completions.create.return_value = invalid_completion
+
+        with patch.dict(os.environ, {"DEEPINFRA_API_KEY": "test-key"}), patch(
+            "common.rag_generation.OpenAI", return_value=client
+        ):
+            with self.assertRaises(metrics.JudgeResponseError):
+                metrics.DeepInfraJudge(
+                    model="test-model",
+                    max_retries=3,
+                    request_sleep_seconds=0,
+                    retry_sleep_seconds=0,
+                ).judge(
+                    "Question?",
+                    "Answer.",
+                    ["Answer."],
+                )
+
+        self.assertEqual(client.chat.completions.create.call_count, 4)
+
+    def test_evaluate_predictions_does_not_fallback_on_judge_response_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "outputs"
+            output_dir.mkdir()
+            csv_path = root / "officeqa.csv"
+            config_path = root / "config.yaml"
+
+            pd.DataFrame(
+                [
+                    {
+                        "uid": "Q1",
+                        "question": "What was debt in March 2024?",
+                        "answer": "100",
+                        "source_files": "treasury_bulletin_2024_03.txt",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "question_id": "Q1",
+                        "question": "What was debt in March 2024?",
+                        "gold_answer": "100",
+                        "predicted_answer": "Debt was 100.",
+                        "retrieved_context_ids": json.dumps(["c1"]),
+                    }
+                ]
+            ).to_csv(output_dir / "predictions.csv", index=False)
+            with (output_dir / "chunks.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "text": "Debt was 100.",
+                            "metadata": {
+                                "chunk_id": "c1",
+                                "source_path": "treasury_bulletin_2024_03.txt",
+                                "year": 2024,
+                                "month": 3,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            config_path.write_text(f"csv_path: {csv_path}\noutput_dir: {output_dir}\n", encoding="utf-8")
+
+            with patch.object(
+                metrics.DeepInfraJudge,
+                "judge",
+                side_effect=metrics.JudgeResponseError("LLM judge did not return valid JSON"),
+            ):
+                with self.assertRaises(metrics.JudgeResponseError):
+                    evaluate_predictions(config_path=config_path, use_judge=True)
+
+            self.assertFalse((output_dir / "judge_error.json").exists())
 
     def test_deepinfra_judge_reads_reasoning_content_when_message_content_is_empty(self):
         completion = SimpleNamespace(

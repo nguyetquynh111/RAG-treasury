@@ -10,7 +10,7 @@ import numpy as np
 from baseline.config import DEFAULT_CONFIG_PATH, load_config, resolve_path
 from common.embeddings import Embedder
 from common.chunk_io import load_chunks
-from common.retrieval_utils import matching_indices
+from common.retrieval_utils import matching_indices, ranked_vector_search
 from common.vector_index import load_vector_index
 
 
@@ -64,14 +64,13 @@ class Retriever:
         if not allowed_indices:
             return []
 
-        if len(allowed_indices) == len(self.chunks):
-            scores, ids = self.index.search(query.reshape(1, -1), min(k, self.index.ntotal))
-            pairs = [(int(idx), float(score)) for idx, score in zip(ids[0], scores[0]) if idx >= 0]
-        else:
-            matrix = self.embeddings[np.array(allowed_indices)]
-            scores = matrix @ query
-            order = np.argsort(-scores)[:k]
-            pairs = [(allowed_indices[int(position)], float(scores[int(position)])) for position in order]
+        pairs = ranked_vector_search(
+            index=self.index,
+            embeddings=self.embeddings,
+            query=query,
+            allowed_indices=allowed_indices,
+            top_k=k,
+        )
 
         results = []
         for chunk_index, score in pairs[:k]:

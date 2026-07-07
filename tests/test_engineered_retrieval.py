@@ -1,5 +1,9 @@
 import unittest
 
+import numpy as np
+
+from common.retrieval_utils import ranked_vector_search
+from common.vector_index import build_inner_product_index
 from engineered.retrieval import (
     BM25Index,
     distribution_based_scores,
@@ -43,6 +47,27 @@ class EngineeredRetrievalTests(unittest.TestCase):
         self.assertEqual(scores[0], 0.0)
         self.assertEqual(max(scores), 1.0)
         self.assertTrue(all(0.0 <= score <= 1.0 for score in scores))
+
+    def test_ranked_vector_search_handles_filtered_indices(self):
+        embeddings = np.asarray(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.8, 0.2],
+            ],
+            dtype="float32",
+        )
+        index = build_inner_product_index(embeddings)
+
+        ranked = ranked_vector_search(
+            index=index,
+            embeddings=embeddings,
+            query=np.asarray([1.0, 0.0], dtype="float32"),
+            allowed_indices=[1, 2],
+            top_k=2,
+        )
+
+        self.assertEqual([index for index, _ in ranked], [2, 1])
 
 
 if __name__ == "__main__":

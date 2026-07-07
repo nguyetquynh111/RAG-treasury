@@ -17,8 +17,6 @@ from baseline.dataset import load_filtered_officeqa
 from baseline.generation import BaselineRAGAnswerGenerator
 from baseline.retrieval import Retriever
 from common.rag_output import (
-    BASE_PREDICTION_COLUMNS,
-    json_dumps,
     retrieved_context_ids,
     retrieved_context_records,
     retrieved_source_records,
@@ -41,9 +39,12 @@ def run_qa(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
     model_config = summarize_model_config(config, generator.actual_backend, generator.actual_model)
 
     predictions_path = output_dir / "predictions.csv"
+    logs_path = output_dir / "retrieval_logs.jsonl"
     columns = prediction_columns()
     total_questions = len(answer_key)
-    with predictions_path.open("w", encoding="utf-8", newline="") as handle:
+    with predictions_path.open("w", encoding="utf-8", newline="") as handle, logs_path.open(
+        "w", encoding="utf-8"
+    ) as logs_handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         flush_csv(handle)
@@ -54,37 +55,43 @@ def run_qa(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
             month = None if pd.isna(row["baseline_month"]) else int(row["baseline_month"])
             retrieved = retriever.retrieve(question, top_k=config["top_k"], year=year, month=month)
             predicted_answer = generator.generate(question, retrieved)
+            final_context_ids = retrieved_context_ids(retrieved, lambda chunk: chunk.get("metadata", {}))
+            final_sources = retrieved_source_records(
+                retrieved,
+                get_metadata=lambda chunk: chunk.get("metadata", {}),
+                get_scores=baseline_scores,
+            )
+            final_context = retrieved_context_records(
+                retrieved,
+                get_text=lambda chunk: str(chunk.get("text", "")),
+                get_metadata=lambda chunk: chunk.get("metadata", {}),
+            )
 
             prediction_row = {
                 "question_id": question_id,
                 "question": question,
                 "gold_answer": row["baseline_answer"],
                 "predicted_answer": predicted_answer,
-                "selected_years": json_dumps(config["selected_years"]),
                 "detected_year": year,
                 "detected_month": month,
-                "retrieved_sources": json_dumps(
-                    retrieved_source_records(
-                        retrieved,
-                        get_metadata=lambda chunk: chunk.get("metadata", {}),
-                        get_scores=baseline_scores,
-                    )
-                ),
-                "retrieved_context_ids": json_dumps(
-                    retrieved_context_ids(retrieved, lambda chunk: chunk.get("metadata", {}))
-                ),
-                "retrieved_context": json_dumps(
-                    retrieved_context_records(
-                        retrieved,
-                        get_text=lambda chunk: str(chunk.get("text", "")),
-                        get_metadata=lambda chunk: chunk.get("metadata", {}),
-                    )
-                ),
                 "retrieval_method": RETRIEVAL_METHOD,
-                "model_config": model_config,
             }
             writer.writerow(prediction_row)
             flush_csv(handle)
+
+            log_row = {
+                "question_id": question_id,
+                "selected_years": config["selected_years"],
+                "detected_year": year,
+                "detected_month": month,
+                "retrieval_method": RETRIEVAL_METHOD,
+                "model_config": json.loads(model_config),
+                "final_context_ids": final_context_ids,
+                "final_sources": final_sources,
+                "final_context": final_context,
+            }
+            logs_handle.write(json.dumps(log_row, ensure_ascii=False) + "\n")
+            flush_csv(logs_handle)
             print(
                 f"[baseline] wrote {completed_count}/{total_questions} question_id={question_id} "
                 f"to {predictions_path}",
@@ -160,10 +167,9 @@ def prediction_columns() -> list[str]:
         "question",
         "gold_answer",
         "predicted_answer",
-        "selected_years",
         "detected_year",
         "detected_month",
-        *BASE_PREDICTION_COLUMNS[4:],
+        "retrieval_method",
     ]
 
 
